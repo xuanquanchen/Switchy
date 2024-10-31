@@ -4,7 +4,7 @@
 #pragma comment(lib, "Imm32.lib")
 
 #if _DEBUG
-#include <stdio.h>
+	#include <stdio.h>
 #endif // _DEBUG
 
 //define flag for switching subtypes
@@ -25,6 +25,7 @@ void ReleaseKey(int keyCode);
 void ToggleCapsLockState();
 LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
 void EnsureLanguageMode(int simplified_chinese_flag);
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
 
 
 HHOOK hHook;
@@ -32,6 +33,9 @@ BOOL enabled = TRUE;
 BOOL keystrokeCapsProcessed = FALSE;
 BOOL keystrokeShiftProcessed = FALSE;
 BOOL winPressed = FALSE;
+HWND hMainWnd = NULL;
+UINT_PTR g_timerId = 0;
+
 
 Settings settings = {
 	.popup = FALSE
@@ -58,6 +62,32 @@ int main(int argc, char** argv)
 		ShowError("Another instance of Switchy is already running!");
 		return 1;
 	}
+
+	// 注册窗口类
+	WNDCLASS wc = {0};
+	wc.lpfnWndProc = WindowProc;
+	wc.hInstance = GetModuleHandle(NULL);
+	wc.lpszClassName = "HiddenWindowClass";
+	RegisterClass(&wc);
+
+	// 创建隐藏窗口
+	hMainWnd = CreateWindowEx(
+		0,
+		"HiddenWindowClass",
+		"HiddenWindow",
+		WS_OVERLAPPEDWINDOW,
+		CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+		NULL, NULL, GetModuleHandle(NULL), NULL
+	);
+
+	if (hMainWnd == NULL)
+	{
+		ShowError("Failed to create hidden window.");
+		return 1;
+	}
+
+	// 隐藏窗口
+	ShowWindow(hMainWnd, SW_HIDE);
 
 	// Set a global low-level keyboard hook. 
 	//WH_KEYBOARD_LL allows the hook to be in the current process without requiring a DLL,
@@ -172,7 +202,12 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 						ReleaseKey(VK_MENU);
 						ReleaseKey(VK_LSHIFT);
 
-						EnsureLanguageMode(SIMPLIFIED_CHINESE_SWITCH_METHOD_CTRL_SPACE);
+						if (g_timerId == 0)
+						{
+							g_timerId = SetTimer(hMainWnd, 1, 300, NULL);
+						}
+
+						//EnsureLanguageMode(SIMPLIFIED_CHINESE_SWITCH_METHOD_CTRL_SPACE);
 					}
 					else
 					{
@@ -204,7 +239,13 @@ LRESULT CALLBACK LowLevelKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
 						ReleaseKey(VK_SPACE);
 						winPressed = TRUE;
 
-					EnsureLanguageMode(SIMPLIFIED_CHINESE_SWITCH_METHOD_CTRL_SPACE);
+
+						if (g_timerId == 0)
+						{
+							g_timerId = SetTimer(hMainWnd, 1, 300, NULL);
+						}
+
+					//EnsureLanguageMode(SIMPLIFIED_CHINESE_SWITCH_METHOD_CTRL_SPACE);
 					}
 				}
 			}
@@ -350,46 +391,54 @@ void EnsureLanguageMode(int simplified_chinese_flag)
     HWND hWnd = GetForegroundWindow();
     if (hWnd == NULL)
     {
-    #ifdef _DEBUG
+#if _DEBUG
         printf("Failed to get foreground window.\n");
-    #endif
+#endif
         return;
     }
 
     // 获取前台窗口所属的线程 ID
-    DWORD dwThreadId = GetWindowThreadProcessId(hWnd, NULL);
+    //DWORD dwThreadId = GetWindowThreadProcessId(hWnd, NULL);
 
     // 将当前线程附加到前台窗口的线程
     DWORD dwCurrentThreadId = GetCurrentThreadId();
-    BOOL bAttached = AttachThreadInput(dwCurrentThreadId, dwThreadId, TRUE);
+	DWORD dwForegroundThreadId = GetWindowThreadProcessId(hWnd, NULL);
+    BOOL bAttached = AttachThreadInput(dwCurrentThreadId, dwForegroundThreadId, TRUE);
 
     // 获取前台线程的键盘布局
-    HKL hkl = GetKeyboardLayout(dwThreadId);
+    HKL hkl = GetKeyboardLayout(dwForegroundThreadId);
     DWORD dwLayout = (DWORD)(UINT_PTR)hkl & 0xFFFFFFFF;
 
     char layoutName[KL_NAMELENGTH];
     snprintf(layoutName, KL_NAMELENGTH, "%08X", dwLayout);
 
-#ifdef _DEBUG
+#if _DEBUG
     printf("Current keyboard layout: %s\n", layoutName);
 #endif
 
     // 判断是否为简体中文输入法
     if (dwLayout == 0x08040804 || dwLayout == 0x00000804)
     {
-    #ifdef _DEBUG
+#if _DEBUG
         printf("Simplified Chinese layout detected.\n");
-    #endif
+#endif
+
+		// 获取前台窗口的类名和标题
+		char className[256] = {0};
+		char windowTitle[256] = {0};
+		GetClassNameA(hWnd, className, sizeof(className));
+		GetWindowTextA(hWnd, windowTitle, sizeof(windowTitle));
+
+#ifdef _DEBUG
+		printf("Foreground window class: %s, title: %s\n", className, windowTitle);
+#endif
 
         HIMC hIMC = ImmGetContext(hWnd);
         if (hIMC == NULL)
         {
-    #ifdef _DEBUG
-            printf("Failed to get input context.\n");
-    #endif
-            // 解除线程附加
-            if (bAttached)
-                AttachThreadInput(dwCurrentThreadId, dwThreadId, FALSE);
+#if _DEBUG
+            printf("Failed to get input context. Error code: %d\n", GetLastError());
+#endif
             return;
         }
 
@@ -399,15 +448,15 @@ void EnsureLanguageMode(int simplified_chinese_flag)
         // 获取转换状态
         if (ImmGetConversionStatus(hIMC, &fdwConversion, &fdwSentence))
         {
-    #ifdef _DEBUG
+#if _DEBUG
             printf("Current conversion mode: 0x%08X\n", fdwConversion);
-    #endif
+#endif
             // 判断是否为中文输入模式
             if (!(fdwConversion & IME_CMODE_NATIVE))
             {
-    #ifdef _DEBUG
+#if _DEBUG
                 printf("Current mode is English, switching to Chinese mode.\n");
-    #endif
+#endif
                 // 切换到中文输入模式
                 // 发送 Ctrl+Space 按键组合
                 PressKey(VK_CONTROL);
@@ -415,31 +464,56 @@ void EnsureLanguageMode(int simplified_chinese_flag)
                 ReleaseKey(VK_SPACE);
                 ReleaseKey(VK_CONTROL);
             }
+
             else
             {
-    #ifdef _DEBUG
+#if _DEBUG
                 printf("Already in Chinese input mode.\n");
-    #endif
+#endif
             }
         }
         else
         {
-    #ifdef _DEBUG
-            printf("Failed to get conversion status.\n");
-    #endif
+#if _DEBUG
+            printf("Failed to get conversion status. Error code: %d\n", GetLastError());
+#endif
         }
 
         // 释放输入法上下文句柄
         ImmReleaseContext(hWnd, hIMC);
     }
+
     else
     {
-    #ifdef _DEBUG
+#if _DEBUG
         printf("Current layout is not Simplified Chinese.\n");
-    #endif
+#endif
     }
 
     // 解除线程附加
     if (bAttached)
-        AttachThreadInput(dwCurrentThreadId, dwThreadId, FALSE);
+        AttachThreadInput(dwCurrentThreadId, dwForegroundThreadId, FALSE);
+}
+
+
+LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
+{
+    switch (uMsg)
+    {
+    case WM_TIMER:
+        if (wParam == 1)
+        {
+            KillTimer(hWnd, 1);
+            g_timerId = 0;
+            EnsureLanguageMode(SIMPLIFIED_CHINESE_SWITCH_METHOD_CTRL_SPACE);
+        }
+        return 0;
+
+    case WM_DESTROY:
+        PostQuitMessage(0);
+        return 0;
+
+    default:
+        return DefWindowProc(hWnd, uMsg, wParam, lParam);
+    }
 }
